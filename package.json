@@ -9,6 +9,8 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit",
+    "test": "node --test tests/*.test.mjs",
     "preview": "vite preview",
     "db:start": "node server/scripts/db-start.js start",
     "db:stop": "node server/scripts/db-start.js stop",

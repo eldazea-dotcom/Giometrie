@@ -3,22 +3,51 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: giometrie-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: '1.4.4'
 
       - name: Install frontend deps
         run: bun install --frozen-lockfile
 
+      - name: Type-check frontend
+        run: bun run typecheck
+
+      - name: Run regression tests
+        run: bun run test
+
+      - name: Check deployment scripts
+        run: |
+          bash -n deploy/deploy.sh
+          bash -n deploy/restart.sh
+          node --test deploy/validate-config.test.mjs
+
       - name: Build frontend
         run: bun run build
+
+      - name: Record release identity
+        run: node deploy/write-release.mjs
 
       - name: Install backend deps
         working-directory: server
@@ -36,38 +65,13 @@ jobs:
       # a raw multi-line key into GitHub's secret box is prone to silent CRLF/whitespace
       # corruption on Windows, which breaks ssh-agent with a cryptic "error in libcrypto".
       # A single base64 line has no such failure mode.
-      - name: Install SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          eval "$(ssh-agent -s)"
-          ssh-add ~/.ssh/deploy_key
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-
-      - name: Trust VPS host key
-        run: ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
-
-      - name: Sync build artifacts
-        run: |
-          rsync -az --delete dist/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/dist/"
-          rsync -az --delete shared/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/shared/"
-          rsync -az --delete --exclude=uploads --exclude=.env server/src/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/server/src/"
-          rsync -az server/prisma/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/server/prisma/"
-          rsync -az server/package.json server/bun.lock server/tsconfig.json "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/server/"
-          rsync -az deploy/ecosystem.config.js "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/ecosystem.config.js"
-
-      - name: Install deps, migrate, restart
-        run: |
-          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" '
-            set -e
-            cd "${{ secrets.DEPLOY_PATH }}"
-            mkdir -p server/uploads
-            cd server
-            bun install --frozen-lockfile
-            bunx prisma generate
-            bunx prisma migrate deploy
-            cd ..
-            pm2 restart giometrie-api --update-env || pm2 start ecosystem.config.js
-            pm2 save
-          '
+      - name: Deploy and verify production
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_SITE_URL: ${{ vars.DEPLOY_SITE_URL || 'https://www.giometrie.uz' }}
+        run: bash deploy/deploy.sh

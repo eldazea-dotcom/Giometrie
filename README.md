@@ -96,3 +96,10 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+## Production deployment
+
+Pushes to `main` run the Deploy workflow after frontend/backend type checks,
+regression tests and the production build. Actions can also run it manually on
+`main`. See [deploy/README.md](deploy/README.md) for the server prerequisites,
+required repository secrets, release verification and production handoff.
