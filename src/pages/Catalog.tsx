@@ -13,10 +13,18 @@ import { getPageSeo } from '@/lib/pageSeo';
 import { useSystemSettings } from '@/hooks/useSystemSettings';
 import { useAuth } from '@/hooks/useAuth';
 import { CatalogFilterSidebar, SidebarFilters } from '@/components/CatalogFilterSidebar';
-import { apiGet } from '@/integrations/api/client';
+import { ApiError, apiGet } from '@/integrations/api/client';
 import { getTranslated } from '@shared/translate';
 
 const PAGE_SIZE = 24;
+
+type CatalogSetState = {
+  id: string;
+  status: 'ready' | 'not-found' | 'error';
+  productIds?: string[];
+  title?: { uz: string; ru: string; translations: Record<string, { title?: string }> | null };
+  image?: string | null;
+};
 
 export default function Catalog() {
   const { language, t } = useLanguage();
@@ -37,23 +45,29 @@ export default function Catalog() {
   const sectionParam = searchParams.get('section') || '';
   const discountedParam = searchParams.get('discounted') === '1';
 
-  const [setProductIds, setSetProductIds] = useState<string[] | null>(null);
-  const [setTitle, setSetTitle] = useState<{ uz: string; ru: string; translations: Record<string, { title?: string }> | null } | null>(null);
-  const [setImage, setSetImage] = useState<string | null>(null);
+  const [setState, setSetState] = useState<CatalogSetState | null>(null);
+  const [setRetry, setSetRetry] = useState(0);
+  const currentSetState = setState?.id === setId ? setState : null;
+  const setProductIds = currentSetState?.productIds ?? null;
+  const setTitle = currentSetState?.title ?? null;
+  const setImage = currentSetState?.image ?? null;
+  const setLoading = !!setId && currentSetState === null;
+  const setError = currentSetState?.status === 'error';
+  const setNotFound = currentSetState?.status === 'not-found';
   
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(initialPage);
 
   const { options: filterOptions } = useProductFilterOptions();
-  const { categories } = useCategories();
-  const { sections } = useSections();
+  const { categories, loading: categoriesLoading, error: categoriesError, refetch: refetchCategories } = useCategories();
+  const { sections, loading: sectionsLoading, error: sectionsError, refetch: refetchSections } = useSections();
 
   // Resolve slug to category ID for filtering - only return UUID or 'all'
   const resolvedCategoryId = useMemo(() => {
     if (initialCategoryParam === 'all') return 'all';
     const found = categories.find(c => c.slug === initialCategoryParam || c.id === initialCategoryParam);
-    return found ? found.id : null; // null means still resolving
+    return found ? found.id : null;
   }, [initialCategoryParam, categories]);
 
   // Resolve section slug to section ID for filtering
@@ -62,6 +76,14 @@ export default function Catalog() {
     const found = sections.find(s => s.slug === sectionParam || s.id === sectionParam);
     return found ? found.id : null;
   }, [sectionParam, sections]);
+
+  const categoryNotFound = !setId && initialCategoryParam !== 'all'
+    && !categoriesLoading && !categoriesError && resolvedCategoryId === null;
+  // An explicit category takes precedence over a section, as in the query below.
+  const sectionNotFound = !setId && initialCategoryParam === 'all' && !!sectionParam
+    && !sectionsLoading && !sectionsError && resolvedSectionId === null;
+  const metadataLoading = !setId && (categoriesLoading || sectionsLoading);
+  const metadataError = !setId && (categoriesError || sectionsError);
 
   const selectedSection = useMemo(() => sections.find(s => s.id === resolvedSectionId), [resolvedSectionId, sections]);
   const sectionName = selectedSection ? catName(selectedSection) : null;
@@ -130,22 +152,28 @@ export default function Catalog() {
 
   // Fetch set product_ids when ?set= is in URL
   useEffect(() => {
-    // Reset stale set data immediately when setId changes
-    setSetProductIds(null);
-    setSetTitle(null);
-    setSetImage(null);
+    setSetState(null);
     if (!setId) return;
     let cancelled = false;
     (async () => {
-      const { item: data } = await apiGet<{ item: any }>(`/api/sets/${setId}`);
-      if (cancelled) return;
-      setSetProductIds((data?.productIds as string[]) || []);
-      setSetTitle(data ? { uz: data.titleUz, ru: data.titleRu, translations: data.translations } : null);
-      setSetImage((data?.image as string) || null);
-      setCurrentPage(1);
+      try {
+        const { item: data } = await apiGet<{ item: any }>(`/api/sets/${encodeURIComponent(setId)}`);
+        if (cancelled) return;
+        setSetState(data ? {
+          id: setId,
+          status: 'ready',
+          productIds: (data.productIds as string[]) || [],
+          title: { uz: data.titleUz, ru: data.titleRu, translations: data.translations },
+          image: (data.image as string) || null,
+        } : { id: setId, status: 'not-found' });
+        setCurrentPage(1);
+      } catch (err) {
+        if (cancelled) return;
+        setSetState({ id: setId, status: err instanceof ApiError && err.status === 404 ? 'not-found' : 'error' });
+      }
     })();
     return () => { cancelled = true; };
-  }, [setId]);
+  }, [setId, setRetry]);
 
   // Map sidebar filters to DB query filters
   const isUUID = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
@@ -158,6 +186,13 @@ export default function Catalog() {
       // While the set is still loading, short-circuit to avoid fetching the full catalog
       f.productIds = setProductIds ?? [];
       if (debouncedSearch) f.search = debouncedSearch;
+      return f;
+    }
+
+    // Category/section metadata also defines the material exclusions. Do not
+    // request an unscoped catalog while those dependencies are unavailable.
+    if (metadataLoading || metadataError || categoryNotFound || sectionNotFound) {
+      f.productIds = [];
       return f;
     }
 
@@ -192,10 +227,10 @@ export default function Catalog() {
     if (standaloneCategoryIds.length > 0) f.excludeCategoryIds = standaloneCategoryIds;
 
     return f;
-  }, [debouncedSearch, sidebarFilters, filterOptions.maxPrice, promoTileId, discountedParam, setId, setProductIds, priceTouched, categories, resolvedSectionId, sectionCategoryIds, standaloneCategoryIds]);
+  }, [debouncedSearch, sidebarFilters, filterOptions.maxPrice, promoTileId, discountedParam, setId, setProductIds, priceTouched, categories, resolvedSectionId, sectionCategoryIds, standaloneCategoryIds, metadataLoading, metadataError, categoryNotFound, sectionNotFound]);
 
 
-  const { products, totalCount, totalPages, loading: productsLoading } = useProducts(currentPage, filters, PAGE_SIZE);
+  const { products, totalCount, totalPages, loading: productsLoading, error: productsError, refetch: refetchProducts } = useProducts(currentPage, filters, PAGE_SIZE);
 
   // Show the catalog sections overview when no filters/search/set are active and sections exist.
   const showSectionsOverview =
@@ -204,8 +239,10 @@ export default function Catalog() {
   // Treat as loading while the URL category slug hasn't synced into local filters yet
   // to avoid showing stale products from the previous category.
   const categorySyncing =
-    resolvedCategoryId === null || resolvedCategoryId !== sidebarFilters.categoryId;
-  const loading = productsLoading || categorySyncing;
+    !setId && resolvedCategoryId !== null && resolvedCategoryId !== sidebarFilters.categoryId;
+  const catalogNotFound = categoryNotFound || sectionNotFound || setNotFound;
+  const catalogError = metadataError || setError || productsError;
+  const loading = metadataLoading || setLoading || (!catalogError && !catalogNotFound && (productsLoading || categorySyncing));
 
   // --- Scroll position preservation across product detail navigation ---
   const location = useLocation();
@@ -241,7 +278,7 @@ export default function Catalog() {
     });
   }, [navigationType, loading, scrollKey, products.length]);
 
-  const selectedCategory = categories?.find(c => c.slug === sidebarFilters.categoryId || c.id === sidebarFilters.categoryId);
+  const selectedCategory = categories.find(c => c.id === resolvedCategoryId);
   const categoryName = selectedCategory ? catName(selectedCategory) : sectionName;
 
   const catalogSeo = getPageSeo('catalog', language);
@@ -314,6 +351,28 @@ export default function Catalog() {
     setCurrentPage(1);
   }, []);
 
+  const handleClearFilters = () => {
+    setSearch('');
+    setDebouncedSearch('');
+    handleApplyFilters({
+      categoryId: 'all', priceMin: 0, priceMax: filterOptions.maxPrice,
+      materials: [], colors: [], furLengths: [], applications: [],
+      inStock: false, discounted: false,
+    });
+    setPriceTouched(false);
+    setSearchParams({});
+  };
+
+  const handleRetry = () => {
+    if (categoriesError) void refetchCategories();
+    if (sectionsError) void refetchSections();
+    if (setError) {
+      setSetState(null);
+      setSetRetry((attempt) => attempt + 1);
+    }
+    if (productsError && !metadataError && !setError) void refetchProducts();
+  };
+
   const handlePageChange = (page: number) => {
     setCurrentPage(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -360,7 +419,7 @@ export default function Catalog() {
             {(() => {
               // Show subcategory chips: children of currently selected top-level category,
               // or all top-level parents when viewing "all" categories.
-              const selectedId = sidebarFilters.categoryId;
+              const selectedId = resolvedCategoryId;
               const currentCat = categories.find(c => c.id === selectedId);
               // If a subcategory is selected, show its siblings under the same parent.
               const parentId = currentCat?.parent_id || (currentCat ? currentCat.id : null);
@@ -615,17 +674,17 @@ export default function Catalog() {
             {/* Products always render — sections overview removed per request */}
             <>
 
-                <p className="text-sm text-muted-foreground mb-4">
+                <p className="text-sm text-muted-foreground mb-4" aria-live="polite">
                   {loading ? (
                     <span className="flex items-center gap-2">
                       <Loader2 className="w-4 h-4 animate-spin" />
                       {language === 'uz' ? 'Yuklanmoqda...' : 'Загрузка...'}
                     </span>
-                  ) : (
+                  ) : !catalogError && !catalogNotFound ? (
                     <>
                       {t.catalog.showing} {products.length} {t.catalog.of} {totalCount} {t.catalog.products}
                     </>
-                  )}
+                  ) : null}
                 </p>
 
                 {loading ? (
@@ -639,6 +698,32 @@ export default function Catalog() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                ) : catalogError ? (
+                  <div className="text-center py-16 space-y-4" role="alert">
+                    <h2 className="text-lg font-semibold">
+                      {language === 'uz' ? 'Katalogni yuklab bo‘lmadi' : 'Не удалось загрузить каталог'}
+                    </h2>
+                    <p className="text-muted-foreground">
+                      {language === 'uz' ? 'Ulanishni tekshirib, qayta urinib ko‘ring.' : 'Проверьте соединение и попробуйте ещё раз.'}
+                    </p>
+                    <Button variant="outline" onClick={handleRetry}>
+                      {language === 'uz' ? 'Qayta urinish' : 'Попробовать снова'}
+                    </Button>
+                  </div>
+                ) : catalogNotFound ? (
+                  <div className="text-center py-16 space-y-4" role="status">
+                    <h2 className="text-lg font-semibold">
+                      {setNotFound
+                        ? (language === 'uz' ? 'To‘plam topilmadi' : 'Подборка не найдена')
+                        : (language === 'uz' ? 'Kategoriya topilmadi' : 'Категория не найдена')}
+                    </h2>
+                    <p className="text-muted-foreground">
+                      {language === 'uz' ? 'Katalogdan boshqa kategoriya yoki mahsulotni tanlang.' : 'Выберите другую категорию или товар в каталоге.'}
+                    </p>
+                    <Button variant="outline" onClick={handleClearFilters}>
+                      {language === 'uz' ? 'Katalogga qaytish' : 'Вернуться в каталог'}
+                    </Button>
                   </div>
                 ) : products.length > 0 ? (
                   <>
@@ -688,11 +773,7 @@ export default function Catalog() {
                     <p className="text-muted-foreground">{t.catalog.noProducts}</p>
                     <Button
                       variant="link"
-                      onClick={() => handleApplyFilters({
-                        categoryId: 'all', priceMin: 0, priceMax: filterOptions.maxPrice,
-                        materials: [], colors: [], furLengths: [],
-                        applications: [], inStock: false, discounted: false,
-                      })}
+                      onClick={handleClearFilters}
                     >
                       {t.catalog.clearFilters}
                     </Button>

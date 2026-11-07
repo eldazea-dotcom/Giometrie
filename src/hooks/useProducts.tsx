@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { apiGet } from '@/integrations/api/client';
 
 export interface ProductAttributeItem {
@@ -228,8 +228,10 @@ export function useProducts(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [loadedRequestKey, setLoadedRequestKey] = useState('');
+  const requestVersion = useRef(0);
 
   const fetchProducts = useCallback(async () => {
+    const version = ++requestVersion.current;
     setLoading(true);
     setError(null);
 
@@ -261,6 +263,7 @@ export function useProducts(
         promoTileId: filters.promoTileId,
         productIds: filters.productIds,
       });
+      if (version !== requestVersion.current) return;
 
       const products = result.items.map(mapApiProduct);
       const totalPages = Math.ceil(result.total / pageSize);
@@ -268,19 +271,21 @@ export function useProducts(
       setData({ products, totalCount: result.total, totalPages, currentPage: page });
       setLoadedRequestKey(requestKey);
     } catch (err) {
+      if (version !== requestVersion.current) return;
       console.error('Error fetching products:', err);
       setError(err instanceof Error ? err : new Error('Failed to fetch products'));
       setLoadedRequestKey(requestKey);
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [page, pageSize, filtersKey, requestKey]);
 
   useEffect(() => {
     fetchProducts();
+    return () => { requestVersion.current += 1; };
   }, [fetchProducts]);
 
-  return { ...data, loading: loading || loadedRequestKey !== requestKey, error, refetch: fetchProducts };
+  return { ...data, loading: loading || loadedRequestKey !== requestKey, error: loadedRequestKey === requestKey ? error : null, refetch: fetchProducts };
 }
 
 export function useFeaturedProducts(limit: number = 8, enabled = true) {
@@ -318,29 +323,38 @@ export function useFeaturedProducts(limit: number = 8, enabled = true) {
 export function useCategories(enabled = true) {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const requestVersion = useRef(0);
 
-  useEffect(() => {
+  const fetchCategories = useCallback(async () => {
+    const version = ++requestVersion.current;
     if (!enabled) {
       setLoading(false);
+      setError(null);
       return;
     }
 
-    const fetchCategories = async () => {
-      setLoading(true);
-      try {
-        const { items } = await apiGet<{ items: any[] }>('/api/categories');
-        setCategories(items.map(mapCategory));
-      } catch (err) {
-        console.error('Error fetching categories:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchCategories();
+    setLoading(true);
+    setError(null);
+    try {
+      const { items } = await apiGet<{ items: any[] }>('/api/categories');
+      if (version !== requestVersion.current) return;
+      setCategories(items.map(mapCategory));
+    } catch (err) {
+      if (version !== requestVersion.current) return;
+      console.error('Error fetching categories:', err);
+      setError(err instanceof Error ? err : new Error('Failed to fetch categories'));
+    } finally {
+      if (version === requestVersion.current) setLoading(false);
+    }
   }, [enabled]);
 
-  return { categories, loading };
+  useEffect(() => {
+    fetchCategories();
+    return () => { requestVersion.current += 1; };
+  }, [fetchCategories]);
+
+  return { categories, loading, error, refetch: fetchCategories };
 }
 
 // Alias with explicit loaded flag for callers that need to distinguish
@@ -353,39 +367,49 @@ export function useCategoriesWithState(enabled = true) {
 export function useSections(enabled = true) {
   const [sections, setSections] = useState<Array<{ id: string; name_uz: string; name_ru: string; translations: Record<string, { name?: string }> | null; slug: string; sort_order: number; is_active: boolean; show_in_main_nav: boolean }>>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const requestVersion = useRef(0);
 
-  useEffect(() => {
+  const fetchSections = useCallback(async () => {
+    const version = ++requestVersion.current;
     if (!enabled) {
       setLoading(false);
+      setError(null);
       return;
     }
 
-    const fetchSections = async () => {
-      try {
-        const { items } = await apiGet<{ items: any[] }>('/api/sections');
-        setSections(
-          items.map((s) => ({
-            id: s.id,
-            name_uz: s.nameUz,
-            name_ru: s.nameRu,
-            translations: s.translations,
-            slug: s.slug,
-            sort_order: s.sortOrder,
-            is_active: s.isActive,
-            show_in_main_nav: s.showInMainNav !== false,
-          }))
-        );
-      } catch (err) {
-        console.error('Error fetching sections:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchSections();
+    setLoading(true);
+    setError(null);
+    try {
+      const { items } = await apiGet<{ items: any[] }>('/api/sections');
+      if (version !== requestVersion.current) return;
+      setSections(
+        items.map((s) => ({
+          id: s.id,
+          name_uz: s.nameUz,
+          name_ru: s.nameRu,
+          translations: s.translations,
+          slug: s.slug,
+          sort_order: s.sortOrder,
+          is_active: s.isActive,
+          show_in_main_nav: s.showInMainNav !== false,
+        }))
+      );
+    } catch (err) {
+      if (version !== requestVersion.current) return;
+      console.error('Error fetching sections:', err);
+      setError(err instanceof Error ? err : new Error('Failed to fetch sections'));
+    } finally {
+      if (version === requestVersion.current) setLoading(false);
+    }
   }, [enabled]);
 
-  return { sections, loading };
+  useEffect(() => {
+    fetchSections();
+    return () => { requestVersion.current += 1; };
+  }, [fetchSections]);
+
+  return { sections, loading, error, refetch: fetchSections };
 }
 
 // Admin hook for the "Materiallar" tab's picker (MaterialSelector): every product
