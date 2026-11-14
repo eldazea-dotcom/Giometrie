@@ -55,8 +55,8 @@ export default function Catalog() {
   const setError = currentSetState?.status === 'error';
   const setNotFound = currentSetState?.status === 'not-found';
   
-  const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const search = searchParams.get('search') ?? '';
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
   const [currentPage, setCurrentPage] = useState(initialPage);
 
   const { options: filterOptions } = useProductFilterOptions();
@@ -313,15 +313,16 @@ export default function Catalog() {
     if (resolvedCategoryId !== sidebarFilters.categoryId) return;
 
     const params = new URLSearchParams();
+    if (search) params.set('search', search);
 
     // Preserve section navigation while other filters change
     if (sectionParam) params.set('section', sectionParam);
 
-    // When a set is active, only keep the set param (drop stale filters)
+    // Set views retain their search and page while dropping unrelated filters.
     if (setId) {
       params.set('set', setId);
       if (currentPage > 1) params.set('page', currentPage.toString());
-      setSearchParams(params, { replace: true });
+      if (params.toString() !== searchParams.toString()) setSearchParams(params, { replace: true });
       return;
     }
 
@@ -340,8 +341,8 @@ export default function Catalog() {
     if (sidebarFilters.discounted) params.set('discount', '1');
     if (promoTileId) params.set('promo', promoTileId);
     if (currentPage > 1) params.set('page', currentPage.toString());
-    setSearchParams(params, { replace: true });
-  }, [sidebarFilters, currentPage, setSearchParams, filterOptions.maxPrice, resolvedCategoryId, promoTileId, setId, priceTouched, sectionParam]);
+    if (params.toString() !== searchParams.toString()) setSearchParams(params, { replace: true });
+  }, [sidebarFilters, currentPage, search, searchParams, setSearchParams, filterOptions.maxPrice, resolvedCategoryId, promoTileId, setId, priceTouched, sectionParam, categories]);
 
 
 
@@ -352,7 +353,6 @@ export default function Catalog() {
   }, []);
 
   const handleClearFilters = () => {
-    setSearch('');
     setDebouncedSearch('');
     handleApplyFilters({
       categoryId: 'all', priceMin: 0, priceMax: filterOptions.maxPrice,
@@ -659,7 +659,13 @@ export default function Catalog() {
               <Input
                 placeholder={t.catalog.search}
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  const params = new URLSearchParams(searchParams);
+                  if (value) params.set('search', value);
+                  else params.delete('search');
+                  setSearchParams(params, { replace: true });
+                }}
                 className="pl-10 rounded-xl h-11"
               />
             </div>
